@@ -2,6 +2,11 @@
 #include <stdio.h>
 #include <string.h>
 
+#if defined(_WIN32)
+#  include <fcntl.h>
+#  include <io.h>
+#endif
+
 #include "msearch/io.h"
 #include "msearch/log.h"
 
@@ -24,6 +29,15 @@ Status msearch_write_results(const char *path, const Match *matches, int count, 
      * Byte-identical output across backends, rank counts *and* operating
      * systems is the property the golden-file tests check. */
     FILE *fp = to_stdout ? stdout : fopen(path, "wb");
+#if defined(_WIN32)
+    /* stdout is opened in text mode by the C runtime, so it needs the same
+     * treatment or `-o -` would disagree with `-o file` on Windows. Only
+     * results are ever written to stdout, so switching the whole stream is safe. */
+    if (to_stdout) {
+        fflush(stdout);
+        _setmode(_fileno(stdout), _O_BINARY);
+    }
+#endif
     if (fp == NULL) {
         msearch_set_err(err, err_len, "cannot open '%s' for writing: %s", path, strerror(errno));
         return MSEARCH_ERR_IO;

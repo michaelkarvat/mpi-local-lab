@@ -92,6 +92,28 @@ jobs:
         run: |
           cppcheck --enable=warning,portability --inline-suppr \
                    --suppress=missingIncludeSystem -I include -I src src
+  # The Dockerfile is a documented entry point, so it is tested like one. The
+  # image build runs the full suite internally; these steps additionally check
+  # that the commands printed in the README actually work.
+  docker:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build image (runs the test suite inside)
+        run: docker build -t msearch .
+      - name: Serial, OpenMP and MPI all produce the golden output
+        run: |
+          set -eux
+          for mode in \
+            "msearch --backend serial" \
+            "msearch --backend openmp" \
+            "mpirun -n 3 --oversubscribe msearch --backend serial"
+          do
+            docker run --rm msearch sh -c \
+              "$mode -i tests/data/reference.txt -o -" 2>/dev/null > actual.txt
+            diff tests/data/reference.expected actual.txt
+          done
+
   tooling:
     runs-on: ubuntu-latest
     steps:

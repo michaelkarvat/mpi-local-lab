@@ -71,6 +71,7 @@ Picture 1 found Object 1 in Position(1,2)
 - **`--verify`**: runs every available backend on the same problem and requires
   exact agreement with the serial reference.
 - **Degrades gracefully.** No CUDA, no MPI, no OpenMP? It still builds and runs.
+- **Runs with no toolchain at all** via the bundled [Dockerfile](#with-docker).
 - **Measured, not assumed**: a serial baseline, a seeded dataset generator, and
   a benchmark harness — see [PERFORMANCE.md](docs/PERFORMANCE.md).
 - **Actionable errors**: `input.txt:14: expected element 6 of 9 for picture 7, got 'banana'`.
@@ -139,7 +140,8 @@ docs/                ARCHITECTURE.md · PERFORMANCE.md
 ## Install and run
 
 **Requirements:** a C11 compiler and CMake ≥ 3.18. Everything else is optional
-and detected automatically.
+and detected automatically. Prefer not to install anything? Skip to
+[With Docker](#with-docker).
 
 ```bash
 cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
@@ -181,6 +183,63 @@ reference: serial (3 pictures)
   openmp   OK (identical to serial)
   cuda     OK (identical to serial)
 ```
+
+### With Docker
+
+If you would rather not install a C toolchain, OpenMP and OpenMPI, the image
+brings all three. Native CMake builds remain fully supported — Docker is an
+alternative, not a replacement, and it is the only way to get the CUDA backend.
+
+```bash
+# 1. Build (runs the full test suite during the build)
+docker build -t msearch .
+
+# 2. Serial
+docker run --rm msearch msearch --backend serial -i tests/data/example.txt -o -
+
+# 3. OpenMP
+docker run --rm msearch msearch --backend openmp --threads 4 \
+    -i tests/data/reference.txt -o -
+
+# 4. MPI — four ranks inside the container
+docker run --rm msearch mpirun -n 4 --oversubscribe \
+    msearch --backend serial -i tests/data/reference.txt -o -
+```
+
+All three produce identical output, which is the point.
+
+The **test suite runs during `docker build`**, so a broken commit cannot produce
+a usable image. To run it again on demand, build the builder stage and invoke
+CTest in it:
+
+```bash
+docker build --target builder -t msearch-test .
+docker run --rm -e OMPI_ALLOW_RUN_AS_ROOT=1 -e OMPI_ALLOW_RUN_AS_ROOT_CONFIRM=1 \
+    msearch-test ctest --test-dir build --output-on-failure
+```
+
+To work on your own data, mount a directory:
+
+```bash
+docker run --rm -v "$PWD/data:/data" msearch \
+    msearch --backend openmp -i /data/problem.txt -o /data/results.txt
+```
+
+Notes:
+
+- The image runs as an unprivileged user, because `mpirun` refuses to run as
+  root and nothing here needs it.
+- `--oversubscribe` lets you request more ranks than the container has cores.
+  Dropping it is fine when ranks ≤ cores.
+- **Combining MPI and OpenMP:** each rank divides the node's cores by the
+  number of ranks sharing it, so `mpirun -n 4` on 16 cores gives 4 threads per
+  rank rather than 16. Without that, the four ranks would spawn 64 threads
+  between them — measured at **14× slower** on the reference input. `--threads`
+  and `OMP_NUM_THREADS` both override the default.
+- **CUDA is not in this image, on purpose.** A GPU image needs the NVIDIA
+  driver plus the NVIDIA Container Toolkit configured on the host, which
+  replaces one build command with a host-setup exercise. Build natively for
+  GPU support.
 
 ### On a cluster
 

@@ -90,7 +90,9 @@ def run(binary: str, path: str, backend: str, threads: Optional[int], reps: int,
         print(f"  ! {backend} threads={threads} ranks={ranks} failed:\n{result.stderr}",
               file=sys.stderr)
         return None
-    match = BENCH_LINE.search(result.stdout)
+    # Timing goes to stderr so that `--output -` keeps stdout clean for results;
+    # both streams are scanned so the harness does not care which it lands on.
+    match = BENCH_LINE.search(result.stderr) or BENCH_LINE.search(result.stdout)
     if match is None:
         return None
     return {key: float(match.group(key)) for key in ("min", "median", "mean", "max")}

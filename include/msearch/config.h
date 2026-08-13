@@ -24,6 +24,10 @@ typedef struct {
      * CUDA backend maps it onto a device so that N ranks on a node drive N
      * GPUs -- the standard one-rank-per-GPU idiom. 0 outside MPI runs. */
     int node_rank;
+    /* How many ranks share this compute node (1 outside MPI runs). The OpenMP
+     * backend divides the node's cores by this, so co-located ranks do not
+     * each spawn a full set of threads. */
+    int node_ranks;
     double zero_eps;
     int bench_reps; /* 0 = disabled */
     bool verify;    /* cross-check every available backend against serial */

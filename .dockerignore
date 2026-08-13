@@ -1,0 +1,47 @@
+# Keep the build context small and the image reproducible. Anything that is
+# generated, host-specific, or irrelevant to compiling stays out -- a stale
+# local build/ directory leaking into the image is a classic source of
+# "works in the container, not on CI".
+
+.git
+.gitattributes
+.gitignore
+.github
+
+# Local build output
+build/
+.build/
+cmake-build-*/
+CMakeCache.txt
+CMakeFiles/
+compile_commands.json
+*.o
+*.a
+*.so
+*.exe
+
+# Generated datasets -- regenerate with tools/gen_input.py instead of shipping
+# tens of megabytes into every layer.
+bench/data/
+bench/results/
+output.txt
+*.actual
+job-*.out
+job-*.err
+
+# Not needed to build or run
+docs/
+scripts/
+Makefile
+LICENSE
+*.md
+
+# Editors, OS, Python
+.vscode/
+.idea/
+.claude/
+__pycache__/
+*.pyc
+.venv/
+.DS_Store
+Thumbs.db

@@ -41,19 +41,22 @@ static void abort_all(int code)
     exit(code);
 }
 
-/* Rank within this compute node. Ranks sharing a node must not all grab GPU 0,
- * so the CUDA backend maps this (not the global rank) onto a device. */
-static int compute_node_rank(void)
+/* This process's position within its compute node.
+ *
+ * Two backends need this and neither should know about MPI: the CUDA backend
+ * maps `rank` onto a device so co-located ranks do not all grab GPU 0, and the
+ * OpenMP backend divides the node's cores by `count` so they do not each spawn
+ * a full set of threads. */
+static void compute_node_topology(int *rank, int *count)
 {
+    *rank = 0;
+    *count = 1;
 #ifdef MSEARCH_HAVE_MPI
     MPI_Comm node_comm;
-    int node_rank = 0;
     MPI_Comm_split_type(MPI_COMM_WORLD, MPI_COMM_TYPE_SHARED, 0, MPI_INFO_NULL, &node_comm);
-    MPI_Comm_rank(node_comm, &node_rank);
+    MPI_Comm_rank(node_comm, rank);
+    MPI_Comm_size(node_comm, count);
     MPI_Comm_free(&node_comm);
-    return node_rank;
-#else
-    return 0;
 #endif
 }
 
@@ -177,9 +180,9 @@ static void report_bench(const double *samples, int count, const char *backend_n
 
     /* The minimum is the headline figure: it is the run least polluted by
      * scheduler noise, and it is what a speedup ratio should be built from. */
-    printf("backend=%s ranks=%d reps=%d min=%.6fs median=%.6fs mean=%.6fs max=%.6fs\n",
-           backend_name, world_size, count, sorted[0], sorted[count / 2], total / count,
-           sorted[count - 1]);
+    fprintf(stderr, "backend=%s ranks=%d reps=%d min=%.6fs median=%.6fs mean=%.6fs max=%.6fs\n",
+            backend_name, world_size, count, sorted[0], sorted[count / 2], total / count,
+            sorted[count - 1]);
     free(sorted);
 }
 
@@ -220,7 +223,7 @@ int main(int argc, char **argv)
         goto finalize;
     }
 
-    config.node_rank = compute_node_rank();
+    compute_node_topology(&config.node_rank, &config.node_ranks);
 
     /* Rank 0 owns the file system: one process reads the input and one writes
      * the output, so a shared file system is never hit by N processes at once. */
@@ -296,10 +299,13 @@ int main(int argc, char **argv)
     }
 
     if (topo.rank == 0) {
+        /* Timing is diagnostic, so it goes to stderr and results own stdout.
+         * Otherwise `--output -` interleaves the two and `msearch -o - > file`
+         * writes a TotalTime line into the results. */
         if (config.bench_reps > 0) {
             report_bench(samples, reps, backend->name, topo.world_size);
         } else {
-            printf("TotalTime = %.6f seconds\n", samples[0]);
+            fprintf(stderr, "TotalTime = %.6f seconds\n", samples[0]);
         }
         status = msearch_write_results(config.output_path, matches, problem.num_pictures, err,
                                        ERR_LEN);

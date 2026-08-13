@@ -28,5 +28,26 @@ foreach(expected IN LISTS expected_files)
     file(READ "${actual}" got)
     message(FATAL_ERROR "${stem}: output differs\n--- expected ---\n${want}\n--- actual ---\n${got}")
   endif()
-  message(STATUS "${stem}: ok")
+
+  # `-o -` must put results on stdout and nothing else. Timing and logging
+  # belong on stderr, or `msearch -o - > file` silently corrupts the results.
+  set(piped "${CMAKE_CURRENT_BINARY_DIR}/${stem}.piped")
+  execute_process(
+    COMMAND "${MSEARCH_BIN}" --backend serial -i "${input}" -o -
+    OUTPUT_FILE "${piped}"
+    ERROR_VARIABLE ignored
+    RESULT_VARIABLE code)
+  if(NOT code EQUAL 0)
+    message(FATAL_ERROR "${stem}: msearch -o - exited ${code}")
+  endif()
+  execute_process(
+    COMMAND ${CMAKE_COMMAND} -E compare_files "${expected}" "${piped}"
+    RESULT_VARIABLE diff)
+  if(NOT diff EQUAL 0)
+    file(READ "${piped}" got)
+    message(FATAL_ERROR
+      "${stem}: stdout from '-o -' is not exactly the results\n--- got ---\n${got}")
+  endif()
+
+  message(STATUS "${stem}: ok (file and stdout)")
 endforeach()

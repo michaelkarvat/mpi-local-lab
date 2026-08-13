@@ -25,6 +25,7 @@ void msearch_config_defaults(Config *config)
     config->threads = 0;
     config->device = -1;
     config->node_rank = 0;
+    config->node_ranks = 1;
     config->zero_eps = MSEARCH_DEFAULT_ZERO_EPS;
     config->bench_reps = 0;
     config->verify = false;

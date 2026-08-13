@@ -9,6 +9,7 @@
  */
 #include <omp.h>
 #include <stdlib.h>
+#include <string.h>
 
 #include "backends.h"
 #include "msearch/log.h"
@@ -33,6 +34,33 @@ static bool openmp_available(char *reason, size_t reason_len)
     return true;
 }
 
+/* Decide how many threads this process may use.
+ *
+ * The trap this avoids: under `mpirun -n 4`, four co-located ranks each see the
+ * whole node and each spawn a full set of threads, so a 16-core node runs 64
+ * of them. Measured on the reference input, that costs 14x versus one thread
+ * per core (0.95 s against 0.067 s) -- the machine spends its time context
+ * switching. Dividing the node's cores by the number of ranks sharing it makes
+ * the default safe without anyone having to know the pitfall exists.
+ *
+ * Precedence, most explicit first:
+ *   1. --threads N          the user said exactly what they want
+ *   2. OMP_NUM_THREADS      the user (or SLURM) configured the environment
+ *   3. cores / ranks-on-node
+ */
+static int resolve_thread_count(const Config *config)
+{
+    if (config->threads > 0) {
+        return config->threads;
+    }
+    if (getenv("OMP_NUM_THREADS") != NULL) {
+        return omp_get_max_threads();
+    }
+    const int ranks_here = config->node_ranks > 0 ? config->node_ranks : 1;
+    const int share = omp_get_max_threads() / ranks_here;
+    return share > 0 ? share : 1;
+}
+
 static Status openmp_create(const Problem *problem, const Config *config, void **ctx, char *err,
                             size_t err_len)
 {
@@ -43,7 +71,7 @@ static Status openmp_create(const Problem *problem, const Config *config, void *
     }
     context->problem = problem;
     context->zero_eps = config->zero_eps;
-    context->threads = config->threads > 0 ? config->threads : omp_get_max_threads();
+    context->threads = resolve_thread_count(config);
     *ctx = context;
     MSEARCH_LOG_DEBUG("openmp backend: %d threads", context->threads);
     return MSEARCH_OK;
