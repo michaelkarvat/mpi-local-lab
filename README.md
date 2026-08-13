@@ -7,7 +7,7 @@ A high-performance submatrix search with three interchangeable compute
 backends — scalar C, OpenMP, CUDA — behind one interface, and two runtimes —
 single process and MPI — that use them without knowing which one they hold.
 
-[![CI](https://github.com/michaelkarvat/hybrid-parallel-object-matching/actions/workflows/ci.yml/badge.svg)](../../actions)
+[![CI](https://github.com/michaelkarvat/Hybrid-MPI-OpenMP-CUDA/actions/workflows/ci.yml/badge.svg)](../../actions)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
 ```bash

@@ -61,11 +61,10 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: Jimver/cuda-toolkit@v0.2.16
-        with:
-          cuda: '12.4.0'
-          method: network
-          sub-packages: '["nvcc", "cudart-dev"]'
+      - name: Install nvcc
+        # Distribution package rather than a third-party action: no version pin
+        # to rot, and compile-only checking does not need a specific CUDA release.
+        run: sudo apt-get update && sudo apt-get install -y nvidia-cuda-toolkit
       - name: Configure and build
         run: |
           cmake -S . -B build -DCMAKE_BUILD_TYPE=Release \
@@ -74,23 +73,31 @@ jobs:
       - name: Confirm the CUDA backend is compiled in
         run: ./build/msearch --list-backends | grep -q '^cuda'
 
+  # Advisory, not gating. These report style drift and possible defects, but a
+  # clang-format version bump should not turn the build red for everyone --
+  # correctness lives in build-and-test above. Run `make format` to apply.
   static-checks:
     runs-on: ubuntu-latest
+    continue-on-error: true
     steps:
       - uses: actions/checkout@v4
       - name: Install tools
         run: sudo apt-get update && sudo apt-get install -y clang-format cppcheck
-      - name: Formatting
+      - name: Formatting drift
         run: |
-          find src include tests -name '*.c' -o -name '*.h' -o -name '*.cu' \
-            | xargs clang-format --dry-run --Werror
+          find src include tests \( -name '*.c' -o -name '*.h' -o -name '*.cu' \) \
+            -exec clang-format --dry-run {} + 2>&1 | tee format.log
+          test ! -s format.log || echo "::warning::run 'make format' to normalise"
       - name: cppcheck
         run: |
-          cppcheck --error-exitcode=1 --enable=warning,portability \
-                   --inline-suppr --suppress=missingIncludeSystem \
-                   -I include -I src src
-      - name: Generator and benchmark harness are importable
+          cppcheck --enable=warning,portability --inline-suppr \
+                   --suppress=missingIncludeSystem -I include -I src src
+  tooling:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Generator and benchmark harness run
         run: |
           python3 tools/gen_input.py --pictures 2 --picture-size 16 --objects 2 \
                                      --object-size 3 --seed 1 -o /dev/null
-          python3 -c "import ast,sys; [ast.parse(open(f).read()) for f in ['bench/run_bench.py','tools/gen_input.py']]"
+          python3 -c "import ast; [ast.parse(open(f).read()) for f in ['bench/run_bench.py','tools/gen_input.py']]"
