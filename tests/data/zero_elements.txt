@@ -1,0 +1,23 @@
+# Regression fixture for the |(p - o) / p| singularity at p == 0.
+#
+# The 2x2 block of zeros at row 1, column 3 is an exact occurrence of object
+# 300. Evaluating the metric naively yields 0/0 = NaN there, `NaN < threshold`
+# is false, and the match is silently lost. The zero-eps policy in
+# include/msearch/metric.h makes this placement score exactly 0.
+
+0.5
+1
+
+1 6
+  50  50  50  50  50  50
+  50  50  50   0   0  50
+  50  50  50   0   0  50
+  50  50  50  50  50  50
+  50  50  50  50  50  50
+  50  50  50  50  50  50
+
+1
+
+300 2
+   0   0
+   0   0

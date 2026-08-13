@@ -1,0 +1,50 @@
+# Build output
+build/
+.build/
+cmake-build-*/
+CMakeCache.txt
+CMakeFiles/
+CTestTestfile.cmake
+Testing/
+compile_commands.json
+install_manifest.txt
+*.o
+*.obj
+*.a
+*.so
+*.dylib
+*.dll
+*.exe
+# Anchored: an unanchored `msearch` would also match the include/msearch/
+# directory and silently drop every public header from the repository.
+/msearch
+
+# Program output. Results are generated; only the golden fixtures under
+# tests/data/*.expected are tracked.
+output.txt
+*.actual
+*.out
+!*.expected
+
+# SLURM job logs (the old repo tracked these by accident)
+job-*.out
+job-*.err
+slurm-*.out
+
+# Generated benchmark inputs -- reproducible from tools/gen_input.py, and far
+# too large to belong in git.
+bench/data/
+bench/results/
+
+# Editors / OS
+.vscode/
+.idea/
+.claude/
+*.swp
+.DS_Store
+Thumbs.db
+
+# Python
+__pycache__/
+*.pyc
+.venv/

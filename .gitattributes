@@ -1,0 +1,7 @@
+# The program writes LF unconditionally (see src/core/writer.c), so golden
+# files must not be translated on checkout or the comparison tests fail on
+# Windows.
+* text=auto eol=lf
+
+tests/data/*.expected -text
+*.png binary

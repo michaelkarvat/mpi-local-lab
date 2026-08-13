@@ -1,0 +1,29 @@
+# Two pictures where nothing matches, plus an object larger than either
+# picture (legal, and must not be treated as an error).
+
+0.05         # a tight threshold: only a near-exact occurrence counts
+2            # pictures
+
+10 4
+   1   2   3   4
+   5   6   7   8
+   9  10  11  12
+  13  14  15  16
+
+11 3
+  90  91  92
+  93  94  95
+  96  97  98
+
+2            # objects
+
+20 2         # present nowhere in either picture
+  70  71
+  72  73
+
+21 5         # larger than every picture
+   1   1   1   1   1
+   1   1   1   1   1
+   1   1   1   1   1
+   1   1   1   1   1
+   1   1   1   1   1
