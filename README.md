@@ -97,13 +97,44 @@ named ones, and what the containers do *not* simulate — is in
 |---|---|
 | **Docker Desktop** (or Docker Engine + Compose v2) | the only hard requirement |
 | **Windows: WSL2** | Docker Desktop needs it anyway; `wsl --install` |
-| **A POSIX shell** for `./scripts/*.sh` | Git Bash ships with Git; WSL works too |
+| **Windows: Git Bash** | **the recommended shell** — see below |
 | **Optional: NVIDIA GPU + driver** | for the CUDA examples — [docs/CUDA.md](docs/CUDA.md) |
 
 No compiler, no CMake, no MPI, and no CUDA Toolkit on the host. Everything that
 builds anything lives in the containers.
 
+### Windows: run the scripts from Git Bash
+
+`./scripts/*.sh` are Bash scripts. **PowerShell and `cmd` cannot run them** —
+use **Git Bash**, which is what this project was developed and tested against
+on Windows 11. It ships with [Git for Windows](https://git-scm.com/download/win),
+so if you cloned this repository you almost certainly already have it: right-click
+the project folder → *Open Git Bash here*, or launch **Git Bash** from the Start
+menu and `cd` to the repository.
+
+```bash
+$ ./scripts/start-cluster.sh 4     # works in Git Bash
+```
+
+```powershell
+PS> ./scripts/start-cluster.sh 4   # does not work in PowerShell
+```
+
+WSL works equally well if you prefer it, and is the faster option if you keep
+the repository inside the WSL filesystem — see
+[the note on build speed](docs/MPI_GUIDE.md). Everything else in this
+README — `docker compose`, `docker build`, `docker run` — is fine from any
+shell; it is only the helper scripts that need Bash.
+
+One Git Bash quirk is already handled for you: MSYS rewrites arguments that
+look like Unix paths, so `/build/bin/hello-mpi` would reach Docker as
+`C:/Program Files/Git/build/bin/hello-mpi`. `scripts/lib.sh` disables that, so
+the scripts behave identically in Git Bash and on Linux.
+
 ## Quick start
+
+> **On Windows, run these in Git Bash** (or WSL) — not PowerShell or `cmd`.
+> See [above](#windows-run-the-scripts-from-git-bash).
 
 ```bash
 git clone https://github.com/michaelkarvat/Hybrid-MPI-OpenMP-CUDA.git mpi-local-lab
@@ -154,6 +185,8 @@ script launches into it.
 | `./scripts/status.sh` | node ↔ hostname ↔ IP, and health |
 | `./scripts/run-mpi.sh -n R <example> [args]` | compile the example and run it on R ranks |
 | `./scripts/shell.sh [N]` | interactive shell on node N |
+
+All of them are Bash — on Windows, run them from **Git Bash** or WSL.
 
 `-n` is the number of **ranks**. The number of **nodes** is however many
 containers are running. Ranks are placed round-robin across nodes, so `-n 4` on
