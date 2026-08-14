@@ -1,6 +1,6 @@
 function(msearch_add_test name)
   add_executable(${name} ${name}.c)
-  target_link_libraries(${name} PRIVATE msearch_core msearch_warnings)
+  target_link_libraries(${name} PRIVATE msearch_core mpilab_warnings)
   target_include_directories(${name} PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
   add_test(NAME ${name} COMMAND ${name})
   # Tests write scratch files into the directory they run in.
@@ -22,7 +22,7 @@ add_test(NAME cli_golden_output
 # The MPI runtime must produce byte-identical output to a single process, for
 # every rank count. This is the property that makes the distributed runtime
 # safe to change.
-if(MPI_C_FOUND AND MPIEXEC_EXECUTABLE)
+if(MPILAB_HAVE_MPI AND MPIEXEC_EXECUTABLE)
   add_test(NAME mpi_equivalence
            COMMAND ${CMAKE_COMMAND}
                    -DMSEARCH_BIN=$<TARGET_FILE:msearch>

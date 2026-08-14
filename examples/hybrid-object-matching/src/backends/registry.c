@@ -47,14 +47,15 @@ const MatchBackend *msearch_backend_auto(void)
 
 void msearch_backend_print_list(void)
 {
-    printf("%-8s  %-9s  %s\n", "BACKEND", "STATUS", "DESCRIPTION");
+    /* Width fits "unavailable" (11) so the columns stay aligned in both states. */
+    printf("%-8s  %-11s  %s\n", "BACKEND", "STATUS", "DESCRIPTION");
     for (int i = 0; i < kBackendCount; ++i) {
         char reason[128] = "";
         const bool ok = kBackends[i]->available(reason, sizeof(reason));
-        printf("%-8s  %-9s  %s\n", kBackends[i]->name, ok ? "available" : "unavailable",
+        printf("%-8s  %-11s  %s\n", kBackends[i]->name, ok ? "available" : "unavailable",
                kBackends[i]->description);
         if (!ok && reason[0] != '\0') {
-            printf("%-8s  %-9s  (%s)\n", "", "", reason);
+            printf("%-8s  %-11s  (%s)\n", "", "", reason);
         }
     }
 }

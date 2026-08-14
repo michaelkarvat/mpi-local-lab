@@ -22,19 +22,21 @@ compile_commands.json
 
 # Generated datasets -- regenerate with tools/gen_input.py instead of shipping
 # tens of megabytes into every layer.
-bench/data/
-bench/results/
+**/bench/data/
+**/bench/results/
 output.txt
 *.actual
 job-*.out
 job-*.err
 
-# Not needed to build or run
-docs/
+# Not needed to build or run. The ** forms matter now that examples carry their
+# own docs and Makefile: a top-level-anchored `docs/` would not exclude
+# examples/hybrid-object-matching/docs/, which the builder stage copies whole.
+**/docs/
+**/Makefile
 scripts/
-Makefile
 LICENSE
-*.md
+**/*.md
 
 # Editors, OS, Python
 .vscode/

@@ -1,0 +1,20 @@
+# SSH client defaults for the `mpi` user inside the cluster.
+#
+# Installed to /home/mpi/.ssh/config.
+#
+# Host key checking is disabled on purpose and this is safe *only* because of
+# what these hosts are: containers on a private bridge network, recreated from
+# scratch on every `docker compose up`, reachable from nowhere else. A new host
+# key every time is the normal state, so the usual protection would be a prompt
+# that always fires and that mpirun cannot answer -- it would simply hang.
+#
+# Do not copy this file to anything that talks to a real machine.
+Host *
+    StrictHostKeyChecking no
+    UserKnownHostsFile /dev/null
+    # Otherwise every launch prints "Warning: Permanently added ..." once per
+    # rank, which buries the program's own output.
+    LogLevel ERROR
+    # A dead node should surface as a failed launch, not a stalled one.
+    ConnectTimeout 10
+    ServerAliveInterval 30

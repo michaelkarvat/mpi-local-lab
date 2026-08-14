@@ -20,6 +20,6 @@ cmake -S . -B "$BUILD_DIR" -DCMAKE_BUILD_TYPE="$BUILD_TYPE"
 cmake --build "$BUILD_DIR" --parallel
 
 echo
-"$BUILD_DIR/msearch" --list-backends
+"$BUILD_DIR/bin/msearch" --list-backends
 echo
-echo "Built $BUILD_DIR/msearch. Submit with: sbatch scripts/slurm/submit.sbatch"
+echo "Built $BUILD_DIR/bin/msearch. Submit with: sbatch scripts/slurm/submit.sbatch"

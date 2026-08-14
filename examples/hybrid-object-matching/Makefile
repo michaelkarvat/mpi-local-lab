@@ -1,5 +1,10 @@
 # Convenience wrapper for people (and cluster login nodes) without CMake.
 #
+# Scoped to this example only -- run it from
+# examples/hybrid-object-matching/, not from the repository root. The lab's
+# primary build is CMake at the root; this exists because a login node with no
+# CMake is a real situation and this workload is the one that runs there.
+#
 # CMake remains the primary build -- it is what CI and the test suite use.
 # This Makefile builds the same sources with the same feature detection so a
 # `make` in a fresh checkout always produces a working binary.

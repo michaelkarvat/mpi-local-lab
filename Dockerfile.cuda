@@ -1,0 +1,174 @@
+# syntax=docker/dockerfile:1
+#
+# GPU image: all four backends -- serial, OpenMP, CUDA -- plus a working MPI
+# runtime. The plain ./Dockerfile stays the CPU-only image for machines with no
+# NVIDIA GPU; this one is its superset.
+#
+#   docker build -f Dockerfile.cuda -t msearch:cuda .
+#   docker run --rm --gpus all msearch:cuda msearch --list-backends
+#
+# The point of this file is that nobody needs a CUDA Toolkit on their host. On
+# Windows the only host requirement is a recent NVIDIA driver: WSL2 exposes the
+# GPU, Docker Desktop's NVIDIA runtime injects the driver libraries, and every
+# compiler, header and CUDA runtime library comes from the image. See the
+# "CUDA in Docker" section of the README.
+#
+# ---------------------------------------------------------------------------
+# Why CUDA 12.4 on Ubuntu 22.04
+# ---------------------------------------------------------------------------
+# Chosen for driver reach rather than novelty. CUDA has minor-version
+# compatibility across a major release, so a binary built against 12.4 runs on
+# any driver that supports 12.x -- in practice NVIDIA Windows driver 527.41
+# (Nov 2022) or newer. Pinning a newer minor (12.8, 13.x) would raise the
+# floor for no benefit here: this program uses nothing added after 12.0.
+#
+# Ubuntu 22.04 rather than the 24.04 of the CPU image, because the CUDA images
+# for 22.04 are the most widely mirrored and longest-tested. Consistency of
+# base distro across two images matters less than the GPU one simply working
+# on whatever driver the reader happens to have.
+#
+# GPU architectures are listed explicitly below; the trailing "90" (without
+# -real) also embeds PTX, so the image keeps working by JIT on GPUs newer than
+# anything CUDA 12.4 can target directly.
+
+ARG CUDA_VERSION=12.4.1
+ARG UBUNTU_FLAVOUR=ubuntu22.04
+
+# --------------------------------------------------------------------------
+FROM nvidia/cuda:${CUDA_VERSION}-devel-${UBUNTU_FLAVOUR} AS builder
+
+ENV DEBIAN_FRONTEND=noninteractive
+# The -devel base already provides nvcc and the CUDA headers; everything here
+# is the host-side toolchain that image does not carry.
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        build-essential \
+        cmake \
+        libopenmpi-dev \
+        openmpi-bin \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /src
+COPY CMakeLists.txt ./
+COPY cmake/ cmake/
+COPY examples/ examples/
+
+# Pascal through Hopper as real code, plus PTX from 90 for forward compatibility.
+ARG CUDA_ARCHITECTURES="60-real;70-real;75-real;80-real;86-real;89-real;90"
+
+RUN cmake -S . -B build \
+        -DCMAKE_BUILD_TYPE=Release \
+        -DCMAKE_CUDA_ARCHITECTURES="${CUDA_ARCHITECTURES}" \
+    && cmake --build build --parallel "$(nproc)"
+
+# `docker build` has no GPU: BuildKit does not honour --gpus, so the CUDA
+# backend reports itself unavailable here and the suite exercises the CPU
+# backends only. That is the graceful-degradation path working as designed,
+# and it means the image builds on a GPU-less CI runner. GPU correctness is
+# checked at run time with `--verify` (see README).
+ENV OMPI_ALLOW_RUN_AS_ROOT=1 \
+    OMPI_ALLOW_RUN_AS_ROOT_CONFIRM=1 \
+    OMPI_MCA_btl_vader_single_copy_mechanism=none
+RUN ctest --test-dir build --output-on-failure
+
+# --------------------------------------------------------------------------
+# A simulated MPI node with a GPU. Same role as the dev stage in ./Dockerfile,
+# and deliberately the same setup script, so the only difference between a CPU
+# node and a GPU node is what is installed rather than how it is configured.
+#
+#   docker build -f Dockerfile.cuda --target dev -t mpi-lab:cuda .
+#   docker compose -f compose.yaml -f compose.gpu.yaml up -d
+#
+# `-devel` rather than `-base` here because a dev node compiles: it needs nvcc
+# and the CUDA headers, which only the devel image carries.
+FROM nvidia/cuda:${CUDA_VERSION}-devel-${UBUNTU_FLAVOUR} AS dev
+
+LABEL org.opencontainers.image.title="mpi-local-lab (CUDA dev node)" \
+      org.opencontainers.image.description="Simulated MPI node with CUDA: nvcc, GCC, CMake, OpenMPI, sshd" \
+      org.opencontainers.image.licenses="MIT"
+
+ENV DEBIAN_FRONTEND=noninteractive
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        build-essential \
+        cmake \
+        libopenmpi-dev \
+        openmpi-bin \
+        openssh-server \
+        python3 \
+        gdb \
+        iproute2 \
+        iputils-ping \
+        netcat-openbsd \
+        ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY docker/openmpi-mca-params.conf /etc/openmpi/openmpi-mca-params.conf
+COPY docker/ssh_config /etc/mpi-lab-ssh_config
+COPY docker/setup-node.sh /tmp/setup-node.sh
+RUN sh /tmp/setup-node.sh && rm /tmp/setup-node.sh
+
+COPY docker/entrypoint.sh /usr/local/bin/entrypoint.sh
+RUN chmod +x /usr/local/bin/entrypoint.sh
+
+WORKDIR /workspace
+EXPOSE 22
+
+HEALTHCHECK --interval=5s --timeout=3s --start-period=2s --retries=10 \
+    CMD nc -z 127.0.0.1 22 || exit 1
+
+# The nvidia/cuda base sets an ENTRYPOINT that prints a licence banner to
+# stdout. In a node image that banner would land in the middle of every rank's
+# output. Replacing it with the node entrypoint removes the problem and starts
+# sshd, which is what this container is for.
+ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]
+
+ENV NVIDIA_VISIBLE_DEVICES=all \
+    NVIDIA_DRIVER_CAPABILITIES=compute,utility
+
+# --------------------------------------------------------------------------
+# `-base` rather than `-runtime`: base already carries libcudart, which is the
+# only CUDA library this binary links. `-runtime` adds cuBLAS, cuFFT, NCCL and
+# friends -- roughly 2 GB of libraries nothing here calls.
+FROM nvidia/cuda:${CUDA_VERSION}-base-${UBUNTU_FLAVOUR} AS runtime
+
+LABEL org.opencontainers.image.title="hybrid-parallel-object-matching (CUDA)" \
+      org.opencontainers.image.description="Parallel submatrix search (serial/OpenMP/CUDA/MPI)" \
+      org.opencontainers.image.licenses="MIT" \
+      org.opencontainers.image.source="https://github.com/michaelkarvat/Hybrid-MPI-OpenMP-CUDA"
+
+ENV DEBIAN_FRONTEND=noninteractive
+# The base image carries libcudart; this adds the MPI launcher, the OpenMP
+# runtime and Python for the generator and benchmark harness.
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        openmpi-bin \
+        libgomp1 \
+        python3 \
+    && rm -rf /var/lib/apt/lists/* \
+    && useradd --create-home --shell /bin/bash msearch
+
+COPY --from=builder /src/build/bin/msearch /usr/local/bin/msearch
+
+WORKDIR /work
+COPY examples/hybrid-object-matching/tests/data/ tests/data/
+COPY examples/hybrid-object-matching/tools/ tools/
+COPY examples/hybrid-object-matching/bench/ bench/
+RUN chown -R msearch:msearch /work
+
+USER msearch
+
+# The nvidia/cuda base sets ENTRYPOINT to a script that prints a licence banner
+# *to stdout*. That would land in the middle of the results whenever output
+# goes to stdout (`-o -`), silently corrupting anything piped to a file. Clear
+# it: this image behaves exactly like the CPU one, with the command given in
+# full at the call site.
+ENTRYPOINT []
+
+# Set by the nvidia/cuda base images, repeated here so the GPU requirements are
+# visible at the point they matter rather than inherited invisibly.
+ENV NVIDIA_VISIBLE_DEVICES=all \
+    NVIDIA_DRIVER_CAPABILITIES=compute,utility \
+    OMPI_MCA_btl_vader_single_copy_mechanism=none
+
+# Without --gpus the CUDA backend reports itself unavailable and `--backend
+# auto` falls through to OpenMP, so this image is still useful on a CPU-only
+# host -- it just will not be faster than ./Dockerfile.
+CMD ["msearch", "--list-backends"]

@@ -24,7 +24,7 @@ set -euo pipefail
 INPUT=${MSEARCH_INPUT:-input.txt}
 OUTPUT=${MSEARCH_OUTPUT:-output.txt}
 BACKEND=${MSEARCH_BACKEND:-auto}
-BINARY=${MSEARCH_BINARY:-build/msearch}
+BINARY=${MSEARCH_BINARY:-build/bin/msearch}
 
 mkdir -p logs
 

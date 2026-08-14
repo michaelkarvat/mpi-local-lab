@@ -13,8 +13,8 @@
  *    immediately if so, which gives cross-object early exit *without* a
  *    host-device round trip between objects: a whole picture costs one
  *    synchronisation and one K-int copy back.
- *  - Two kernel decompositions, chosen by object area (see
- *    MSEARCH_CUDA_WARP_MIN_ELEMS).
+ *  - One kernel: a thread per placement, reusing the shared metric so results
+ *    are bit-identical to the CPU backends and the early exit applies here too.
  *  - Determinism comes from atomicMin over the packed placement key, not from
  *    a race on a found-flag.
  */
@@ -33,19 +33,7 @@
  * the double-precision accumulator on all architectures we target. */
 #define MSEARCH_CUDA_BLOCK 256
 
-/* Object area at which we switch from one thread per placement to one warp per
- * placement.
- *
- * Thread-per-placement is the better choice for small objects: neighbouring
- * threads handle neighbouring columns and therefore read neighbouring picture
- * elements, so loads coalesce, and each thread's summation order is identical
- * to the serial backend's (which makes the results bit-identical). Its cost is
- * that one thread walks all m*m elements serially, so beyond a few hundred
- * elements the per-placement latency stops being hidden. Above the threshold
- * we spread one placement across a warp and reduce with __shfl_down_sync. */
-#define MSEARCH_CUDA_WARP_MIN_ELEMS 256
-
-/* Cap on resident blocks; both kernels are grid-stride, so any cap is correct. */
+/* Cap on resident blocks; the kernel is grid-stride, so any cap is correct. */
 #define MSEARCH_CUDA_BLOCKS_PER_SM 32
 
 /* ------------------------------------------------------------------ kernels */
@@ -62,8 +50,20 @@ __device__ __forceinline__ bool earlier_object_matched(const int *results, int o
     return false;
 }
 
-/* One thread per placement. Calls the shared host/device msearch_score_at, so
- * it produces bit-identical scores to the serial and OpenMP backends. */
+/* One thread per placement, calling the shared host/device msearch_score_at.
+ *
+ * Two properties follow from reusing that function rather than hand-writing a
+ * device version: the summation order matches the CPU backends exactly, so
+ * results are bit-identical rather than merely close; and the per-placement
+ * early exit applies on the GPU too.
+ *
+ * An earlier revision also carried a warp-per-placement kernel, on the
+ * reasoning that one thread walking m*m elements would serialise too much for
+ * large objects. Measurement killed it -- see the "one kernel, not two" note
+ * in docs/ARCHITECTURE.md. The short version: spreading a placement across a
+ * warp requires summing all m*m terms before the total can be tested, which
+ * forfeits the early exit, and the early exit is worth far more than the extra
+ * lanes. It lost at every object size and threshold tried, by up to 16x. */
 __global__ void k_search_thread_per_placement(const int *__restrict__ picture, int n,
                                               const int *__restrict__ object, int m, int span,
                                               long long placements, double threshold,
@@ -86,48 +86,6 @@ __global__ void k_search_thread_per_placement(const int *__restrict__ picture, i
         const int row = (int)(key / span);
         const int col = (int)(key % span);
         if (msearch_score_at(picture, n, object, m, row, col, threshold, zero_eps) < threshold) {
-            atomicMin(best, (int)key);
-        }
-    }
-}
-
-/* One warp per placement, for objects large enough that a single thread would
- * serialise too much work. The summation order differs from the serial
- * backend, so scores can differ in the last bits of the mantissa; see
- * docs/ARCHITECTURE.md ("Floating-point reproducibility"). */
-__global__ void k_search_warp_per_placement(const int *__restrict__ picture, int n,
-                                            const int *__restrict__ object, int m, int span,
-                                            long long placements, double threshold,
-                                            double zero_eps, int *__restrict__ results,
-                                            int object_index)
-{
-    if (earlier_object_matched(results, object_index)) {
-        return;
-    }
-    int *best = results + object_index;
-
-    const int lane = (int)(threadIdx.x & 31u);
-    const long long global_warp = ((long long)blockIdx.x * blockDim.x + threadIdx.x) >> 5;
-    const long long warp_stride = ((long long)gridDim.x * blockDim.x) >> 5;
-    const int elems = m * m;
-
-    for (long long key = global_warp; key < placements; key += warp_stride) {
-        if (key >= *(const volatile int *)best) {
-            return;
-        }
-        const int row = (int)(key / span);
-        const int col = (int)(key % span);
-
-        double sum = 0.0;
-        for (int t = lane; t < elems; t += 32) {
-            const int y = t / m;
-            const int x = t - y * m;
-            sum += msearch_term(picture[(long long)(row + y) * n + (col + x)], object[t], zero_eps);
-        }
-        for (int offset = 16; offset > 0; offset >>= 1) {
-            sum += __shfl_down_sync(0xffffffffu, sum, offset);
-        }
-        if (lane == 0 && sum < threshold) {
             atomicMin(best, (int)key);
         }
     }
@@ -323,24 +281,16 @@ static Status cuda_search(void *ctx, const Picture *picture, Match *out, char *e
         }
         const int span = picture->n - object->m + 1;
         const int *d_object = c->d_objects + c->obj_offset[k];
-        const bool use_warp_kernel = (object->m * object->m) >= MSEARCH_CUDA_WARP_MIN_ELEMS;
 
-        const long long units = use_warp_kernel ? placements * 32 : placements;
-        long long want = (units + MSEARCH_CUDA_BLOCK - 1) / MSEARCH_CUDA_BLOCK;
+        long long want = (placements + MSEARCH_CUDA_BLOCK - 1) / MSEARCH_CUDA_BLOCK;
         if (want > max_blocks) {
             want = max_blocks;
         }
         const int blocks = (int)(want > 0 ? want : 1);
 
-        if (use_warp_kernel) {
-            k_search_warp_per_placement<<<blocks, MSEARCH_CUDA_BLOCK, 0, c->stream>>>(
-                c->d_picture, picture->n, d_object, object->m, span, placements, problem->threshold,
-                c->zero_eps, c->d_results, k);
-        } else {
-            k_search_thread_per_placement<<<blocks, MSEARCH_CUDA_BLOCK, 0, c->stream>>>(
-                c->d_picture, picture->n, d_object, object->m, span, placements, problem->threshold,
-                c->zero_eps, c->d_results, k);
-        }
+        k_search_thread_per_placement<<<blocks, MSEARCH_CUDA_BLOCK, 0, c->stream>>>(
+            c->d_picture, picture->n, d_object, object->m, span, placements, problem->threshold,
+            c->zero_eps, c->d_results, k);
         CUDA_CHECK(cudaGetLastError());
     }
 
@@ -367,7 +317,7 @@ fail:
 
 extern "C" const MatchBackend msearch_backend_cuda = {
     "cuda",
-    "NVIDIA GPU (CUDA, persistent buffers, size-adaptive kernels)",
+    "NVIDIA GPU (CUDA, persistent buffers, one thread per placement)",
     cuda_available,
     cuda_create,
     cuda_search,
