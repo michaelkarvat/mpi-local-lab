@@ -3,16 +3,17 @@
 **Run and experiment with MPI locally using Docker containers — no HPC cluster
 required.**
 
-Four Linux containers on a private Docker network, each behaving like a
-separate MPI node: its own hostname, its own sshd, reachable from the others.
-Write an MPI program on your laptop, run it across all four, change the node
-count, and see which node each rank landed on.
+A configurable set of Linux containers on a private Docker network, each
+behaving like a separate MPI node: its own hostname, its own sshd, reachable
+from the others. Write an MPI program on your laptop, run it across the whole
+cluster, resize the cluster to whatever you want to test, and see which node
+each rank landed on.
 
 [![CI](https://github.com/michaelkarvat/Hybrid-MPI-OpenMP-CUDA/actions/workflows/ci.yml/badge.svg)](../../actions)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
 ```console
-$ docker compose up -d
+$ ./scripts/start-cluster.sh 4          # any number: 2, 4, 8, 16 ...
 $ ./scripts/run-mpi.sh -n 4 examples/hello-mpi
 Hello from rank 0 of 4 on 9554245ca3e0
 Hello from rank 1 of 4 on a63bf6a3d2a7
@@ -23,6 +24,11 @@ Hello from rank 3 of 4 on f6813f33c8e8
 Four different hostnames. That is the whole idea: the ranks are not four
 processes on one machine, they are four processes on four machines that MPI
 believes are separate.
+
+**Four is only the default.** The node count is an argument, not a property of
+the design — `./scripts/start-cluster.sh 8` gives you eight, and every example,
+script and test follows along with no file to edit. Four is used throughout
+this README because it fits on a page.
 
 ---
 
@@ -41,8 +47,10 @@ Programs that would deadlock on a real cluster run fine.
 This repository gives you the structure of a multi-node environment on one
 machine, with two commands and no accounts:
 
-- **MPI across multiple containers**, launched over ssh, exactly as a real
-  cluster does it
+- **MPI across as many containers as you ask for**, launched over ssh, exactly
+  as a real cluster does it
+- **A cluster you resize on the fly**, so "does this still work at 3 ranks? at
+  16?" is one command rather than a rebuild
 - **OpenMP inside each node**, so hybrid MPI+OpenMP is a configuration and not
   a rewrite
 - **Optional CUDA**, with the toolkit inside the container and nothing but a
@@ -64,17 +72,32 @@ not a footnote.
                              │
                    mpi-lab-net (bridge)
                              │
-     ┌───────────────┬───────┴───────┬───────────────┐
-     │               │               │               │
-  node-1          node-2          node-3          node-4
- container       container       container       container
-     │               │               │               │
-  Rank 0          Rank 1          Rank 2          Rank 3
-     └───────────────┴───────┬───────┴───────────────┘
+     ┌───────────────┬───────┴───────┬─────── ⋯ ───────┐
+     │               │               │                 │
+  node-1          node-2          node-3     ⋯      node-N
+ container       container       container         container
+     │               │               │                 │
+  Rank 0          Rank 1          Rank 2     ⋯      Rank N-1
+     └───────────────┴───────┬───────┴─────── ⋯ ───────┘
                              │
               /workspace  ← your source, bind-mounted
               /build      ← shared volume, one compile for all
 ```
+
+**N is yours to choose.** `compose.yaml` defines one node service and scales
+it, rather than spelling out `node1`…`node4`, so the cluster size is a
+command-line argument:
+
+```bash
+./scripts/start-cluster.sh 4      # the default
+./scripts/start-cluster.sh 8      # or eight
+./scripts/start-cluster.sh 2      # or two
+```
+
+Ranks and nodes are independent too: `-n` asks for ranks, and they are placed
+round-robin over whatever nodes exist. Twelve ranks on six nodes is two each,
+and asking for more ranks than the cluster has slots oversubscribes with a
+warning rather than failing.
 
 Two axes, kept independent, because they answer different questions:
 
@@ -85,10 +108,11 @@ Two axes, kept independent, because they answer different questions:
 
 Any combination works, and nothing in an example has to know which one it got.
 That separation is what lets the same source run under `mpirun -n 2` on your
-laptop, across four containers here, and under SLURM on a real machine.
+laptop, across any number of containers here, and under SLURM on a real
+machine.
 
-Full reasoning — including why ssh, why one replicated service instead of four
-named ones, and what the containers do *not* simulate — is in
+Full reasoning — including why ssh, why one replicated service instead of a
+fixed list of named ones, and what the containers do *not* simulate — is in
 **[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)**.
 
 ## Prerequisites
@@ -140,11 +164,23 @@ the scripts behave identically in Git Bash and on Linux.
 git clone https://github.com/michaelkarvat/Hybrid-MPI-OpenMP-CUDA.git mpi-local-lab
 cd mpi-local-lab
 
-docker compose up -d                          # four nodes
+./scripts/start-cluster.sh 4                  # 4 is the example, not a limit
 ./scripts/run-mpi.sh -n 4 examples/hello-mpi
 ```
 
-Expected:
+Pick whatever size you want to work at — the rest of the quick start is
+identical:
+
+```bash
+./scripts/start-cluster.sh 8                  # eight nodes
+./scripts/run-mpi.sh -n 8 examples/hello-mpi
+```
+
+`docker compose up -d` also works and gives you the default four. The script
+does the same thing and then waits until every node's sshd is actually
+listening, which is what you want before another command launches into it.
+
+Expected, at four:
 
 ```text
 Hello from rank 0 of 4 on 9554245ca3e0
@@ -169,12 +205,8 @@ nodes: 4   network: mpi-lab-net   build volume: mpi-lab-build
 Stop when you are done:
 
 ```bash
-docker compose down
+./scripts/stop-cluster.sh      # or: docker compose down
 ```
-
-`./scripts/start-cluster.sh` does the same as `docker compose up -d` but waits
-until every node's sshd is actually listening, which is what you want before a
-script launches into it.
 
 ## The commands
 
@@ -194,7 +226,9 @@ a four-node cluster is one rank per node and `-n 8` is two.
 
 ### Changing the cluster size
 
-No file to edit:
+Any reasonable number, at any time, with no file to edit — scale up to explore
+a collective's behaviour at a rank count you have not tried, or down to two
+when you just want a fast edit-run loop:
 
 ```console
 $ ./scripts/start-cluster.sh 6
@@ -208,6 +242,12 @@ Hello from rank 5 of 6 on 1f34f6946755
 
 $ ./scripts/run-mpi.sh -n 12 distributed-sum     # 12 ranks over 6 nodes
 ```
+
+The practical ceiling is your host, not the design: every node is a container
+with an sshd, so they are cheap to leave idle, but they are all competing for
+the same cores once they start computing. A few dozen is fine for correctness
+work on an ordinary laptop; there is no point going past that, because adding
+nodes adds no hardware — see [what this cannot tell you](#what-this-cannot-tell-you).
 
 ## Examples
 
@@ -313,8 +353,8 @@ CI runs both, plus builds with OpenMP off, MPI off and everything off, because
 
 ## What this cannot tell you
 
-The containers are **logical nodes, not physical machines**. `node-1` through
-`node-4` share:
+The containers are **logical nodes, not physical machines**. However many you
+start, `node-1` through `node-N` all share:
 
 - the same CPU and the same cores
 - the same RAM and the same memory bandwidth
