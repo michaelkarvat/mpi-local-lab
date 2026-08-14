@@ -18,13 +18,13 @@ jobs:
       matrix:
         include:
           - name: serial only
-            flags: -DMSEARCH_ENABLE_OPENMP=OFF -DMSEARCH_ENABLE_MPI=OFF -DMSEARCH_ENABLE_CUDA=OFF
+            flags: -DMPILAB_ENABLE_OPENMP=OFF -DMPILAB_ENABLE_MPI=OFF -DMPILAB_ENABLE_CUDA=OFF
             mpi: false
           - name: openmp
-            flags: -DMSEARCH_ENABLE_MPI=OFF -DMSEARCH_ENABLE_CUDA=OFF
+            flags: -DMPILAB_ENABLE_MPI=OFF -DMPILAB_ENABLE_CUDA=OFF
             mpi: false
           - name: openmp + mpi
-            flags: -DMSEARCH_ENABLE_CUDA=OFF
+            flags: -DMPILAB_ENABLE_CUDA=OFF
             mpi: true
 
     steps:
@@ -35,7 +35,7 @@ jobs:
         run: sudo apt-get update && sudo apt-get install -y libopenmpi-dev openmpi-bin
 
       - name: Configure
-        run: cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DMSEARCH_WERROR=ON ${{ matrix.flags }}
+        run: cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DMPILAB_WERROR=ON ${{ matrix.flags }}
 
       - name: Build
         run: cmake --build build --parallel
@@ -44,12 +44,14 @@ jobs:
         run: ctest --test-dir build --output-on-failure
 
       - name: Backend equivalence on the reference input
-        run: ./build/msearch --verify -i tests/data/reference.txt
+        run: |
+          ./build/bin/msearch --verify \
+            -i examples/hybrid-object-matching/tests/data/reference.txt
 
       - name: Reject a bad input cleanly
         run: |
           printf '1.0\n1\n7 3\n1 2 3\n' > bad.txt
-          if ./build/msearch -i bad.txt -o /dev/null; then
+          if ./build/bin/msearch -i bad.txt -o /dev/null; then
             echo "expected a non-zero exit for malformed input"; exit 1
           fi
 
@@ -68,10 +70,10 @@ jobs:
       - name: Configure and build
         run: |
           cmake -S . -B build -DCMAKE_BUILD_TYPE=Release \
-                -DMSEARCH_ENABLE_MPI=OFF -DCMAKE_CUDA_ARCHITECTURES=75
+                -DMPILAB_ENABLE_MPI=OFF -DCMAKE_CUDA_ARCHITECTURES=75
           cmake --build build --parallel
       - name: Confirm the CUDA backend is compiled in
-        run: ./build/msearch --list-backends | grep -q '^cuda'
+        run: ./build/bin/msearch --list-backends | grep -q '^cuda'
 
   # Advisory, not gating. These report style drift and possible defects, but a
   # clang-format version bump should not turn the build red for everyone --
@@ -85,13 +87,60 @@ jobs:
         run: sudo apt-get update && sudo apt-get install -y clang-format cppcheck
       - name: Formatting drift
         run: |
-          find src include tests \( -name '*.c' -o -name '*.h' -o -name '*.cu' \) \
+          find examples \( -name '*.c' -o -name '*.h' -o -name '*.cu' \) \
             -exec clang-format --dry-run {} + 2>&1 | tee format.log
           test ! -s format.log || echo "::warning::run 'make format' to normalise"
       - name: cppcheck
         run: |
+          cd examples/hybrid-object-matching
           cppcheck --enable=warning,portability --inline-suppr \
                    --suppress=missingIncludeSystem -I include -I src src
+  # The product itself: several containers on a private network behaving like
+  # separate MPI nodes. Everything above this point would pass on a machine
+  # with no Docker at all, because it builds and runs inside one process tree.
+  # This job is the only one that checks the claim the README leads with.
+  cluster:
+    name: multi-container cluster
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      # start-cluster.sh builds the dev image via compose, then waits on the
+      # HEALTHCHECK rather than returning as soon as the containers exist --
+      # `up -d` completes before sshd is listening, and launching into that
+      # window fails in a way that looks like a broken configuration.
+      - name: Start a four-node cluster
+        run: ./scripts/start-cluster.sh 4
+
+      - name: Environment tests
+        run: bash tests/cluster/run_all.sh
+
+      # The quick start in the README, run exactly as written. If this breaks,
+      # the first thing a new user does breaks.
+      - name: README quick start
+        run: |
+          set -eux
+          ./scripts/run-mpi.sh -n 4 examples/hello-mpi | tee hello.txt
+          test "$(grep -c '^Hello from rank' hello.txt)" -eq 4
+          test "$(sed -n 's/.* on \(.*\)$/\1/p' hello.txt | sort -u | wc -l)" -eq 4
+
+      # Success criterion 5: change the node count without editing any file.
+      - name: Rescale to 6 nodes and oversubscribe
+        run: |
+          set -eux
+          ./scripts/start-cluster.sh 6
+          ./scripts/run-mpi.sh -n 6 examples/hello-mpi | grep -c '^Hello from rank' | grep -qx 6
+          ./scripts/run-mpi.sh -n 12 --no-build distributed-sum 100000 | grep -q 'match    = yes'
+
+      - name: Cluster logs on failure
+        if: failure()
+        run: docker compose logs --tail=50
+
+      - name: Tear down
+        if: always()
+        run: ./scripts/stop-cluster.sh --purge
+
   # The Dockerfile is a documented entry point, so it is tested like one. The
   # image build runs the full suite internally; these steps additionally check
   # that the commands printed in the README actually work.
@@ -99,7 +148,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - name: Build image (runs the test suite inside)
+      - name: Build CPU image (runs the test suite inside)
         run: docker build -t msearch .
       - name: Serial, OpenMP and MPI all produce the golden output
         run: |
@@ -111,8 +160,26 @@ jobs:
           do
             docker run --rm msearch sh -c \
               "$mode -i tests/data/reference.txt -o -" 2>/dev/null > actual.txt
-            diff tests/data/reference.expected actual.txt
+            diff examples/hybrid-object-matching/tests/data/reference.expected actual.txt
           done
+
+      # The GPU image builds without a GPU (docker build cannot access one
+      # anyway), which also exercises the graceful-degradation path: with no
+      # device visible the CUDA backend reports itself unavailable and the
+      # suite runs on the CPU backends. GPU execution is verified by hand on a
+      # machine with a card -- see docs/PERFORMANCE.md.
+      - name: Build CUDA image
+        run: |
+          docker build -f Dockerfile.cuda \
+            --build-arg CUDA_ARCHITECTURES=86-real \
+            -t msearch:cuda .
+      - name: CUDA image degrades gracefully with no GPU present
+        run: |
+          set -eux
+          docker run --rm msearch:cuda msearch --list-backends | grep -E '^cuda +unavailable'
+          docker run --rm msearch:cuda sh -c \
+            "msearch --backend openmp -i tests/data/reference.txt -o -" 2>/dev/null > actual.txt
+          diff examples/hybrid-object-matching/tests/data/reference.expected actual.txt
 
   tooling:
     runs-on: ubuntu-latest
@@ -120,6 +187,7 @@ jobs:
       - uses: actions/checkout@v4
       - name: Generator and benchmark harness run
         run: |
+          cd examples/hybrid-object-matching
           python3 tools/gen_input.py --pictures 2 --picture-size 16 --objects 2 \
                                      --object-size 3 --seed 1 -o /dev/null
           python3 -c "import ast; [ast.parse(open(f).read()) for f in ['bench/run_bench.py','tools/gen_input.py']]"
