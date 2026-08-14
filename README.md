@@ -1,433 +1,345 @@
-# hybrid-parallel-object-matching
+# mpi-local-lab
 
-**Find small matrices inside large ones, fast, on anything from a laptop to a
-multi-node GPU cluster.**
+**Run and experiment with MPI locally using Docker containers — no HPC cluster
+required.**
 
-A high-performance submatrix search with three interchangeable compute
-backends — scalar C, OpenMP, CUDA — behind one interface, and two runtimes —
-single process and MPI — that use them without knowing which one they hold.
+Four Linux containers on a private Docker network, each behaving like a
+separate MPI node: its own hostname, its own sshd, reachable from the others.
+Write an MPI program on your laptop, run it across all four, change the node
+count, and see which node each rank landed on.
 
 [![CI](https://github.com/michaelkarvat/Hybrid-MPI-OpenMP-CUDA/actions/workflows/ci.yml/badge.svg)](../../actions)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
-```bash
-cmake -S . -B build && cmake --build build --parallel
-./build/msearch -i tests/data/example.txt -o -
-# Picture 1 found Object 1 in Position(1,2)
+```console
+$ docker compose up -d
+$ ./scripts/run-mpi.sh -n 4 examples/hello-mpi
+Hello from rank 0 of 4 on 9554245ca3e0
+Hello from rank 1 of 4 on a63bf6a3d2a7
+Hello from rank 2 of 4 on 1cb7287251cb
+Hello from rank 3 of 4 on f6813f33c8e8
 ```
+
+Four different hostnames. That is the whole idea: the ranks are not four
+processes on one machine, they are four processes on four machines that MPI
+believes are separate.
 
 ---
 
-## The problem
+## Why
 
-Given a set of **pictures** (large N×N integer matrices) and a set of
-**objects** (small M×M matrices), decide for each picture whether *any* object
-occurs inside it within a tolerance, and report where.
+MPI is a distributed-memory model, and the interesting parts of it — host
+discovery, process launch over ssh, collectives that cross a network, code that
+behaves differently at 2 ranks than at 4 — only appear when there is more than
+one machine. Learning it usually means getting an account on a cluster first.
 
-For an object placed with its top-left corner at (I, J):
+Running `mpirun -n 4` on one host is a useful approximation, but it never
+exercises any of that. Every rank shares an address space's worth of luck: the
+same filesystem, the same hostname, shared-memory transports instead of TCP.
+Programs that would deadlock on a real cluster run fine.
 
-$$\text{Matching}(I,J) \;=\; \sum_{y,x} \left| \frac{p_{I+y,\,J+x} - o_{y,x}}{p_{I+y,\,J+x}} \right|$$
+This repository gives you the structure of a multi-node environment on one
+machine, with two commands and no accounts:
 
-A placement matches when `Matching(I,J) < threshold`.
+- **MPI across multiple containers**, launched over ssh, exactly as a real
+  cluster does it
+- **OpenMP inside each node**, so hybrid MPI+OpenMP is a configuration and not
+  a rewrite
+- **Optional CUDA**, with the toolkit inside the container and nothing but a
+  driver on the host
+- **Examples from four lines to four thousand**, ending in a real hybrid
+  workload
+- **Tests that check the environment**, not just the programs
 
-**Why it is interesting.** The search space is
-`pictures × objects × (N−M+1)²` placements, each costing `M²` operations — a
-64-picture problem at N=2048, M=16 is billions of element evaluations. The work
-per picture is wildly irregular (pictures differ in size; a match ends a search
-early), which makes naive static partitioning leave processors idle. And the
-metric has a singularity at `p = 0` that quietly corrupts results if unhandled.
-
-## Example
-
-<table>
-<tr><th>Picture (6×6)</th><th>Object (3×3)</th></tr>
-<tr><td><pre>
-10   5  67  12   8   4
-23   6   5  14   9   5
-12  10  20  56   2   3
- 1   2   6  10   3   2
-45   3   7   5   5   2
-11  43   2  54   1  12
-</pre></td><td><pre>
- 5  14   9
-20  56   2
- 6  10   3
-</pre></td></tr>
-</table>
-
-```console
-$ ./build/msearch -i tests/data/example.txt -o -
-Picture 1 found Object 1 in Position(1,2)
-```
-
-## Features
-
-- **Three compute backends** behind one interface — `serial`, `openmp`, `cuda`
-  — selectable at runtime with `--backend`, auto-detected by default.
-- **Two runtimes** — single process, or MPI with dynamic work claiming — that
-  produce **byte-identical output** for any rank count.
-- **Deterministic by contract.** Same input ⇒ same bytes out, on every backend,
-  every run. See [the contract](docs/ARCHITECTURE.md#the-determinism-contract).
-- **`--verify`**: runs every available backend on the same problem and requires
-  exact agreement with the serial reference.
-- **Degrades gracefully.** No CUDA, no MPI, no OpenMP? It still builds and runs.
-- **Runs with no toolchain at all** via the bundled [Dockerfile](#with-docker).
-- **Measured, not assumed**: a serial baseline, a seeded dataset generator, and
-  a benchmark harness — see [PERFORMANCE.md](docs/PERFORMANCE.md).
-- **Actionable errors**: `input.txt:14: expected element 6 of 9 for picture 7, got 'banana'`.
+It is a development and teaching environment. It is [explicitly not a
+performance lab](#what-this-cannot-tell-you) — see the limitations, which are
+not a footnote.
 
 ## Architecture
 
-Two questions are independent, and separating them is the design:
+```text
+                        Host Machine
+                             │
+                       Docker Engine
+                             │
+                   mpi-lab-net (bridge)
+                             │
+     ┌───────────────┬───────┴───────┬───────────────┐
+     │               │               │               │
+  node-1          node-2          node-3          node-4
+ container       container       container       container
+     │               │               │               │
+  Rank 0          Rank 1          Rank 2          Rank 3
+     └───────────────┴───────┬───────┴───────────────┘
+                             │
+              /workspace  ← your source, bind-mounted
+              /build      ← shared volume, one compile for all
+```
+
+Two axes, kept independent, because they answer different questions:
 
 | | |
 |---|---|
-| **How is one picture searched?** | a **backend** — `serial` · `openmp` · `cuda` |
-| **Which process searches which picture?** | a **runtime** — `runner_local` · `runner_mpi` |
+| **Where do processes run?** | a **runtime** — one process · local MPI ranks · this container cluster · a real cluster |
+| **How does one rank compute?** | a **backend** — serial · OpenMP · CUDA |
 
-```mermaid
-flowchart TD
-    CLI["cli/ — flags, composition root"] --> RT
-    RT["runtime/ — who searches what<br/>runner_local · runner_mpi"] --> BE
-    BE["backends/ — how a picture is searched<br/>serial · openmp · cuda"] --> CORE
-    CORE["core/ — problem model, parser, writer, metric<br/><i>no MPI, OpenMP or CUDA anywhere</i>"]
-```
+Any combination works, and nothing in an example has to know which one it got.
+That separation is what lets the same source run under `mpirun -n 2` on your
+laptop, across four containers here, and under SLURM on a real machine.
 
-A backend implements five function pointers:
+Full reasoning — including why ssh, why one replicated service instead of four
+named ones, and what the containers do *not* simulate — is in
+**[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)**.
 
-```c
-typedef struct MatchBackend {
-    const char *name;
-    const char *description;
-    bool   (*available)(char *reason, size_t reason_len);
-    Status (*create)(const Problem *, const Config *, void **ctx, char *err, size_t);
-    Status (*search)(void *ctx, const Picture *, Match *out, char *err, size_t);
-    void   (*destroy)(void *ctx);
-} MatchBackend;
-```
+## Prerequisites
 
-`available()` is a *runtime* probe, not a compile-time flag — the CUDA backend
-is compiled in but unavailable when no device is visible, and `--backend auto`
-falls through to the next one. `create()` is where expensive reusable work
-belongs: the CUDA backend uploads every object to the device exactly once
-there.
+| | |
+|---|---|
+| **Docker Desktop** (or Docker Engine + Compose v2) | the only hard requirement |
+| **Windows: WSL2** | Docker Desktop needs it anyway; `wsl --install` |
+| **A POSIX shell** for `./scripts/*.sh` | Git Bash ships with Git; WSL works too |
+| **Optional: NVIDIA GPU + driver** | for the CUDA examples — [docs/CUDA.md](docs/CUDA.md) |
 
-Full reasoning, including the CUDA and MPI designs and the trade-offs behind
-them, is in **[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)**.
+No compiler, no CMake, no MPI, and no CUDA Toolkit on the host. Everything that
+builds anything lives in the containers.
 
-## Technologies
-
-C11 · CUDA · MPI-3 (one-sided RMA) · OpenMP · CMake · CTest · GitHub Actions ·
-SLURM · Python (tooling)
-
-## Project structure
-
-```
-include/msearch/     public headers — the interfaces, and the reasoning
-  backend.h            the backend contract + determinism rules
-  metric.h             the matching metric, compiled for host AND device
-src/core/            problem model, parser, writer, logging   (no parallelism)
-src/backends/        serial · openmp · cuda · registry
-src/runtime/         runner_local · runner_mpi
-src/cli/             argument parsing, composition root
-tests/               unit tests, fixtures, golden output, CTest scripts
-tools/gen_input.py   dataset generator with planted matches
-bench/run_bench.py   benchmark harness
-scripts/slurm/       build on the login node, run under SLURM
-docs/                ARCHITECTURE.md · PERFORMANCE.md
-```
-
-## Install and run
-
-**Requirements:** a C11 compiler and CMake ≥ 3.18. Everything else is optional
-and detected automatically. Prefer not to install anything? Skip to
-[With Docker](#with-docker).
+## Quick start
 
 ```bash
-cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
-cmake --build build --parallel
-ctest --test-dir build --output-on-failure
+git clone https://github.com/michaelkarvat/Hybrid-MPI-OpenMP-CUDA.git mpi-local-lab
+cd mpi-local-lab
+
+docker compose up -d                          # four nodes
+./scripts/run-mpi.sh -n 4 examples/hello-mpi
 ```
 
-The configure step reports what it found:
+Expected:
 
+```text
+Hello from rank 0 of 4 on 9554245ca3e0
+Hello from rank 1 of 4 on a63bf6a3d2a7
+Hello from rank 2 of 4 on 1cb7287251cb
+Hello from rank 3 of 4 on f6813f33c8e8
 ```
-  OpenMP     : TRUE
-  MPI        : TRUE
-  CUDA       : /usr/local/cuda/bin/nvcc
-```
 
-No CMake? `make` builds the same sources with the same detection.
-
-### Usage
+Those hostnames are container ids. To see which node is which:
 
 ```console
-$ ./build/msearch --list-backends
-BACKEND   STATUS     DESCRIPTION
-cuda      available  NVIDIA GPU (CUDA, persistent buffers, size-adaptive kernels)
-openmp    available  multicore CPU (OpenMP, parallel over placements)
-serial    available  single-threaded reference implementation
+$ ./scripts/status.sh
+NODE                HOSTNAME        IP             STATE      HEALTH
+mpi-lab-node-1      9554245ca3e0    172.18.0.4     running    healthy
+mpi-lab-node-2      a63bf6a3d2a7    172.18.0.2     running    healthy
+mpi-lab-node-3      f6813f33c8e8    172.18.0.5     running    healthy
+mpi-lab-node-4      1cb7287251cb    172.18.0.3     running    healthy
+
+nodes: 4   network: mpi-lab-net   build volume: mpi-lab-build
 ```
+
+Stop when you are done:
 
 ```bash
-./build/msearch -i input.txt -o output.txt          # auto-select the best backend
-./build/msearch --backend openmp --threads 8        # pin the backend and thread count
-./build/msearch --verify -i tests/data/planted.txt  # cross-check every backend
-./build/msearch --backend serial --bench 5          # timing, min/median/mean/max
-mpirun -n 4 ./build/msearch --backend cuda -i big.txt
+docker compose down
+```
+
+`./scripts/start-cluster.sh` does the same as `docker compose up -d` but waits
+until every node's sshd is actually listening, which is what you want before a
+script launches into it.
+
+## The commands
+
+| | |
+|---|---|
+| `./scripts/start-cluster.sh [N]` | start N nodes (default 4) and wait until they are ready |
+| `./scripts/stop-cluster.sh [--purge]` | stop; `--purge` also deletes the shared build volume |
+| `./scripts/status.sh` | node ↔ hostname ↔ IP, and health |
+| `./scripts/run-mpi.sh -n R <example> [args]` | compile the example and run it on R ranks |
+| `./scripts/shell.sh [N]` | interactive shell on node N |
+
+`-n` is the number of **ranks**. The number of **nodes** is however many
+containers are running. Ranks are placed round-robin across nodes, so `-n 4` on
+a four-node cluster is one rank per node and `-n 8` is two.
+
+### Changing the cluster size
+
+No file to edit:
+
+```console
+$ ./scripts/start-cluster.sh 6
+$ ./scripts/run-mpi.sh -n 6 examples/hello-mpi
+Hello from rank 0 of 6 on 9554245ca3e0
+Hello from rank 1 of 6 on a63bf6a3d2a7
+Hello from rank 2 of 6 on 1cb7287251cb
+Hello from rank 3 of 6 on f6813f33c8e8
+Hello from rank 4 of 6 on fdb53a44fa8f
+Hello from rank 5 of 6 on 1f34f6946755
+
+$ ./scripts/run-mpi.sh -n 12 distributed-sum     # 12 ranks over 6 nodes
+```
+
+## Examples
+
+Progressively harder, and each one exists to show a specific thing.
+
+| | Example | What it demonstrates |
+|---|---|---|
+| 1 | [`hello-mpi`](examples/hello-mpi/) | rank ids, world size, and *which node* a rank landed on |
+| 2 | [`ping-pong`](examples/ping-pong/) | `MPI_Send`/`MPI_Recv`, matching tags, round-trip latency |
+| 3 | [`distributed-sum`](examples/distributed-sum/) | `MPI_Scatterv` + `MPI_Reduce` over an uneven split |
+| 4 | [`matrix-multiply`](examples/matrix-multiply/) | row-block distribution, MPI **and** OpenMP together |
+| 5 | [`hybrid-object-matching`](examples/hybrid-object-matching/) | MPI + OpenMP + CUDA, three interchangeable backends, byte-identical results |
+
+```bash
+./scripts/run-mpi.sh -n 2 ping-pong 1000 65536
+./scripts/run-mpi.sh -n 4 distributed-sum 5000000
+./scripts/run-mpi.sh -n 4 matrix-multiply 512
+./scripts/run-mpi.sh -n 4 msearch --backend openmp \
+    -i examples/hybrid-object-matching/tests/data/reference.txt -o -
+```
+
+Example 5 is the previous life of this repository, and it is worth reading on
+its own: a submatrix search whose serial, OpenMP and CUDA backends are asserted
+**byte-identical**, with a determinism contract that makes that assertion
+meaningful. See
+[its README](examples/hybrid-object-matching/README.md).
+
+### Writing your own
+
+Add a directory under `examples/`, a `CMakeLists.txt` of about four lines, and
+you are done:
+
+```cmake
+mpilab_add_example(my-example
+  SOURCES main.c
+  MPI
+  DESCRIPTION "what it shows")
+
+mpilab_add_rank_test(my-example RANKS 1 2 4 MODE invariant)
+```
+
+`mpilab_add_rank_test` registers a check that the program produces the *same
+output at every rank count* — which is the property most MPI bugs break first.
+More in [docs/MPI_GUIDE.md](docs/MPI_GUIDE.md).
+
+## CUDA
+
+The CUDA Toolkit lives in the container. On the host you need a recent NVIDIA
+driver and nothing else — not on Windows, not in your WSL distro.
+
+```bash
+docker build -f Dockerfile.cuda --target dev -t mpi-lab:cuda .
+docker run --rm --gpus all mpi-lab:cuda nvidia-smi
+
+./scripts/start-cluster.sh --gpu 2       # GPU nodes in the simulated cluster
+./scripts/run-mpi.sh -n 1 msearch --verify \
+    -i examples/hybrid-object-matching/tests/data/reference.txt
 ```
 
 ```console
-$ ./build/msearch --verify -i tests/data/planted.txt
-reference: serial (3 pictures)
-  openmp   OK (identical to serial)
+reference: serial (10 pictures)
+[info ] cuda backend: device 0 (NVIDIA GeForce RTX 3050 4GB Laptop GPU, 20 SMs)
   cuda     OK (identical to serial)
+  openmp   OK (identical to serial)
 ```
 
-### With Docker
+Every GPU node maps onto the **same physical card**, so this is for correctness
+work, not scaling. Setup, requirements and the caveats are in
+[docs/CUDA.md](docs/CUDA.md).
 
-If you would rather not install a C toolchain, OpenMP and OpenMPI, the image
-brings all three. Native CMake builds remain fully supported — Docker is an
-alternative, not a replacement, and it is the only way to get the CUDA backend.
+## Testing
+
+Two suites, checking two different things.
 
 ```bash
-# 1. Build (runs the full test suite during the build)
-docker build -t msearch .
+# Programs: unit tests, golden output, and rank sweeps -- inside one container
+./scripts/shell.sh
+  cmake -S /workspace -B /build && ctest --test-dir /build --output-on-failure
 
-# 2. Serial
-docker run --rm msearch msearch --backend serial -i tests/data/example.txt -o -
-
-# 3. OpenMP
-docker run --rm msearch msearch --backend openmp --threads 4 \
-    -i tests/data/reference.txt -o -
-
-# 4. MPI — four ranks inside the container
-docker run --rm msearch mpirun -n 4 --oversubscribe \
-    msearch --backend serial -i tests/data/reference.txt -o -
+# Environment: the cluster itself -- from the host, against live containers
+bash tests/cluster/run_all.sh
 ```
 
-All three produce identical output, which is the point.
-
-The **test suite runs during `docker build`**, so a broken commit cannot produce
-a usable image. To run it again on demand, build the builder stage and invoke
-CTest in it:
-
-```bash
-docker build --target builder -t msearch-test .
-docker run --rm -e OMPI_ALLOW_RUN_AS_ROOT=1 -e OMPI_ALLOW_RUN_AS_ROOT_CONFIRM=1 \
-    msearch-test ctest --test-dir build --output-on-failure
+```console
+$ bash tests/cluster/run_all.sh
+0. build -- compile every example once, on node 1
+  ok   every example built into the shared volume
+1. name resolution -- every node can find every other node
+  ok   node-1 resolves 'node' to 4 address(es)
+  ...
+3. cross-container MPI -- ranks land on distinct nodes
+  ok   4 rank(s) reported
+  ok   4 distinct hostname(s) -- the ranks really are on separate nodes
+...
+passed 15, failed 0
 ```
 
-To work on your own data, mount a directory:
+The second suite is the one that matters here. Everything in the first would
+pass on a machine with no Docker at all.
 
-```bash
-docker run --rm -v "$PWD/data:/data" msearch \
-    msearch --backend openmp -i /data/problem.txt -o /data/results.txt
-```
+CI runs both, plus builds with OpenMP off, MPI off and everything off, because
+"it builds on my machine" is not the same claim as "it builds".
 
-Notes:
+## What this cannot tell you
 
-- The image runs as an unprivileged user, because `mpirun` refuses to run as
-  root and nothing here needs it.
-- `--oversubscribe` lets you request more ranks than the container has cores.
-  Dropping it is fine when ranks ≤ cores.
-- **Combining MPI and OpenMP:** each rank divides the node's cores by the
-  number of ranks sharing it, so `mpirun -n 4` on 16 cores gives 4 threads per
-  rank rather than 16. Without that, the four ranks would spawn 64 threads
-  between them — measured at **14× slower** on the reference input. `--threads`
-  and `OMP_NUM_THREADS` both override the default.
-- **CUDA is not in this image, on purpose.** A GPU image needs the NVIDIA
-  driver plus the NVIDIA Container Toolkit configured on the host, which
-  replaces one build command with a host-setup exercise. Build natively for
-  GPU support.
+The containers are **logical nodes, not physical machines**. `node-1` through
+`node-4` share:
 
-### On a cluster
+- the same CPU and the same cores
+- the same RAM and the same memory bandwidth
+- the same physical network adapter — traffic between "nodes" never leaves the host
+- the same disk
+- the same GPU, if you use the GPU overlay
+
+So:
+
+| | |
+|---|---|
+| Correctness across ranks | **meaningful** — a collective that deadlocks here deadlocks on a cluster |
+| Architecture and communication patterns | **meaningful** — this is real MPI over real TCP |
+| Latency and bandwidth figures | **not meaningful** — you are measuring a loopback bridge |
+| Multi-node scaling | **not meaningful** — adding nodes adds no hardware |
+
+`ping-pong` will happily print a round-trip time. It is a real measurement of
+this machine's virtual bridge and tells you nothing about an interconnect. Any
+scaling claim involving multiple physical nodes has to come from a real
+cluster.
+
+This is a hard boundary of the approach, not a bug to be fixed later; see
+[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md#what-is-not-simulated).
+
+## Going to a real cluster
+
+Nothing here is container-specific. The same source, the same `CMakeLists.txt`
+and the same binaries run under SLURM:
 
 ```bash
 scripts/slurm/build.sh                  # build once, on the login node
 sbatch scripts/slurm/submit.sbatch
 ```
 
-### Input format
+What changes, what does not, and which of your local assumptions will break, is
+in [docs/REAL_CLUSTER.md](docs/REAL_CLUSTER.md).
 
-A whitespace-separated token stream; `#` comments run to end of line:
+## Repository layout
 
-```
-1.0          # threshold
-1            # picture count
-1  6         # picture id, size
-  10   5  67  12   8   4
-  ...
-1            # object count
-1  3         # object id, size
-   5  14   9
-  ...
-```
-
-Generate one:
-
-```bash
-python tools/gen_input.py --pictures 8 --picture-size 512 --objects 4 \
-                         --object-size 16 --seed 7 -o problem.txt
+```text
+compose.yaml            the cluster: one node service, scaled
+compose.gpu.yaml        overlay that swaps in the CUDA image
+Dockerfile              CPU:  builder → dev (a node) → runtime (an artifact)
+Dockerfile.cuda         GPU:  the same three, on an NVIDIA base
+docker/                 what makes a container a node: sshd, keys, MCA params
+scripts/                start · stop · status · run-mpi · shell
+  node/                 helpers that run inside a node
+cmake/                  mpilab_add_example(), the rank-sweep harness
+examples/               1 hello-mpi · 2 ping-pong · 3 distributed-sum
+                        4 matrix-multiply · 5 hybrid-object-matching
+tests/cluster/          environment tests, run against a live cluster
+docs/                   ARCHITECTURE · MPI_GUIDE · CUDA · REAL_CLUSTER
 ```
 
-It records the planted positions as comments, so the expected answer is written
-into the file — which is what makes it useful for both tests and benchmarks.
+## Technologies
 
-## Important technical decisions
-
-**Determinism over "first match wins".** The obvious implementation returns
-whichever match a thread reaches first and bails. It is marginally faster and
-completely untestable: results vary run to run with thread scheduling. Instead
-the answer is *defined* — lowest object id, then row-major-first placement —
-and implemented as a minimum over a packed placement key (`atomicMin` on GPU).
-The min-reduction carries its own early exit, so the cost is small; what it
-buys is that three independent backends can be asserted byte-identical.
-
-**One metric, compiled three ways.** `include/msearch/metric.h` is compiled by
-both the host compiler and `nvcc`. The serial backend, the OpenMP backend and
-the CUDA thread-per-placement kernel call the *same function*. They are not
-three implementations that ought to agree — they are one implementation, which
-is why "the backends match" is a meaningful test rather than a tautology.
-
-**A defined answer at `p = 0`.** `|(p−o)/p|` is undefined when a picture
-element is zero, which in the reference input happens at the first placement of
-*every picture*. Unhandled it yields `inf` or `NaN`, both of which compare
-false against the threshold, so real matches vanish silently. Substituting a
-small epsilon makes `p = o = 0` an exact match and `p = 0, o ≠ 0` a strong
-mismatch. Tunable via `--zero-eps`; pinned down by `tests/data/zero_elements.txt`.
-
-**A serial backend nobody will run in production.** It exists to be the ground
-truth for `--verify` and the denominator for every speedup number. Without it,
-"3.8× faster" is an unfalsifiable claim.
-
-**Pull-based MPI scheduling, and what it costs.** Ranks claim pictures with an
-MPI-3 `MPI_Fetch_and_op` on a shared counter, so every rank computes and there
-is no scheduler process. The price is that each rank holds the whole problem
-(O(total input) memory, not O(one picture)). For inputs that fit in node
-memory that removes all data movement from the hot path — a deliberate trade,
-documented rather than discovered.
-
-## Engineering challenges worth calling out
-
-**The parallelism was decorative.** The original parallelised over *objects*
-(a dozen) rather than *placements* (millions), guarded a shared flag with a
-critical section on **every** iteration, and had each OpenMP thread issue
-blocking CUDA calls. With one GPU visible, `thread_id % 1` mapped all threads
-to device 0 on the default stream — which serialises against itself. Eight
-threads produced zero concurrency while re-uploading the same picture twelve
-times. Diagnosing *why* a three-level hybrid ran no faster than one level was
-the most interesting part of this project.
-
-**Aborting is contagious in MPI.** The original called `exit(1)` on allocation
-failure; one rank left and every other rank blocked forever in `MPI_Recv`. The
-fix is that failures propagate through the collectives — a failing rank stops
-claiming work but still reaches the barrier, healthy ranks drain the remainder,
-and `MPI_Allreduce(MPI_MAX)` makes all ranks agree on the outcome.
-
-**Early exit is worth more than the GPU.** Because every term is non-negative,
-the partial sum is monotone: a placement can be abandoned the moment it reaches
-the threshold. Three lines, hoisted to once per object row (per element it
-blocks vectorisation; per placement it gives up the benefit) — **16.9× on the
-serial backend**, byte-identical output. It sits in the shared metric, so every
-backend gets it. Reaching for a GPU before finding this would have optimised
-the wrong thing.
-
-**Making a race testable.** Nothing here could be regression-tested until the
-output stopped depending on thread scheduling. The determinism contract came
-first; the test suite became possible afterwards.
-
-## Testing
-
-```console
-$ ctest --test-dir build --output-on-failure
-    Start 1: test_metric        Passed
-    Start 2: test_parser        Passed
-    Start 3: test_options       Passed
-    Start 4: test_backends      Passed
-    Start 5: cli_golden_output  Passed
-    Start 6: mpi_equivalence    Passed
-```
-
-| Test | What it protects |
-|---|---|
-| `test_metric` | metric values, the `p = 0` policy, and that early exit never changes a match decision |
-| `test_parser` | both input layouts, and that each malformed input produces the right error *and* location |
-| `test_options` | argument parsing (a pure function — it reports requests instead of printing and exiting) |
-| `test_backends` | **backend equivalence**: every available backend byte-identical to serial; both determinism rules; repeat-run stability; degenerate shapes |
-| `cli_golden_output` | end-to-end CLI against committed golden files |
-| `mpi_equivalence` | 1–4 ranks produce output identical to a single process |
-
-CI builds three configurations — serial-only, OpenMP, OpenMP+MPI — with
-`-Werror`, compiles the CUDA backend separately, and runs `clang-format` and
-`cppcheck`. "Serial only" is a *tested* configuration, so the claim that this
-builds without a cluster is checked on every push.
-
-## Performance
-
-Measured on an Intel i7-1360P laptop; full method and caveats in
-**[docs/PERFORMANCE.md](docs/PERFORMANCE.md)**.
-
-**Early exit**, serial backend, 66.1 M placements:
-
-| | Best of 3 |
-|---|---|
-| with early exit | **0.997 s** |
-| without | 16.890 s → **16.9× slower** |
-
-**CPU scaling**, same workload:
-
-| Backend | Threads | Best (s) | Speedup |
-|---------|---------|----------|---------|
-| serial  | –  | 0.9693 | 1.00× |
-| openmp  | 1  | 1.0150 | 0.95× |
-| openmp  | 2  | 0.5763 | 1.68× |
-| openmp  | 4  | 0.3373 | 2.87× |
-| openmp  | 8  | 0.2532 | 3.83× |
-| openmp  | 16 | 0.2102 | 4.61× |
-
-The single-thread *regression* (0.95×) is the honest cost of the parallel
-region. Scaling flattens past 4 threads because this CPU has 4 performance
-cores and 8 efficiency cores, and because the kernel is closer to
-memory-bandwidth-bound than compute-bound after early exit.
-
-**GPU numbers are not reported, because no GPU was available to measure them.**
-The CUDA backend compiles and is covered by `--verify` where a device exists;
-claiming a speedup for it here would be an estimate dressed as a result.
-
-## Limitations
-
-- **Every MPI rank holds the whole problem.** Peak memory is O(total input) per
-  rank. Deliberate (see above), but it bounds the input size to what fits in
-  node memory.
-- **CUDA is unmeasured here.** Compiled and structurally reviewed, not
-  benchmarked, for want of a device.
-- **The warp kernel is not bit-identical to serial.** Its reduction order
-  differs, so a score within ~1 ulp of the threshold could classify differently
-  on GPU. Inherent to parallel floating-point reduction; stated, not hidden.
-- **One match per picture.** Reporting the first occurrence is the problem
-  specification, not a limitation of the search — but `--report-all` does not
-  exist yet.
-- **Matrices must be square** and `int`-valued, as specified.
-- **Objects are re-searched per picture.** No cross-picture index or
-  preprocessing (see below).
-
-## Future improvements
-
-- **CPU/GPU co-execution** — split each object's placement range between the
-  CUDA stream and OpenMP threads, tuned by a `--hybrid-split` fraction, so a
-  GPU node's CPUs are not idle. Deliberately left out for now: it is the one
-  feature that could not be tested without a device, and untested complexity is
-  worse than none.
-- **Streaming MPI mode** for problems larger than node memory, restoring
-  push-based distribution behind the same runtime interface.
-- **Algorithmic pruning.** The current search is exhaustive. A summed-area
-  table over the picture would give an O(1) block-sum lower bound per
-  placement, rejecting most candidates without touching M² elements — likely a
-  larger win than any further tuning.
-- **Multi-GPU per rank**, for the case where one rank must drive several
-  devices instead of the standard one-rank-per-GPU mapping.
-- **`--report-all`** to emit every occurrence instead of the canonical first.
+C11 · MPI-3 · OpenMP · CUDA · Docker · Docker Compose · CMake · CTest · Bash ·
+OpenSSH · GitHub Actions · SLURM
 
 ## License
 
