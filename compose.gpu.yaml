@@ -1,0 +1,47 @@
+# GPU overlay: the same cluster, built from the CUDA image, with every node
+# able to see the NVIDIA device.
+#
+#   docker compose -f compose.yaml -f compose.gpu.yaml up -d
+#   ./scripts/start-cluster.sh --gpu 2
+#
+# Everything else -- the scripts, the hostfile, the examples -- is unchanged.
+# The only difference is which image the `node` service is built from, which is
+# the point of having the runtime and the compute backend be independent axes.
+#
+# ---------------------------------------------------------------------------
+# Read this before drawing conclusions from a GPU run here
+# ---------------------------------------------------------------------------
+# Every node in this overlay is mapped onto the SAME physical GPU. Four
+# containers do not become four GPUs; they become four processes contending for
+# one device's memory and SMs. That means:
+#
+#   * correctness experiments are valid -- this is a genuine way to check that
+#     a CUDA kernel produces the same answer under MPI as it does alone, and
+#     `msearch --verify` inside a node is the intended use;
+#   * performance numbers are not. Two ranks sharing one GPU will usually be
+#     slower than one rank owning it, which is the opposite of what the same
+#     job does on a real two-GPU cluster;
+#   * memory is the real limit. A 4 GB card divided between four ranks is 1 GB
+#     each, and the CUDA backend will report an allocation failure long before
+#     the CPU nodes would. Start with 2 nodes, not 8.
+#
+# The honest configuration for GPU work in this repository is one node -- see
+# docs/CUDA.md, which covers running the CUDA image directly with `docker run
+# --gpus all`. This overlay exists because "can a GPU rank participate in the
+# simulated cluster at all" is a question worth being able to answer yes to.
+
+services:
+  node:
+    build:
+      dockerfile: Dockerfile.cuda
+      target: dev
+    image: mpi-lab:cuda
+    deploy:
+      # Deliberately lower than the CPU default of 4. See the memory note above.
+      replicas: 2
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]

@@ -1,0 +1,67 @@
+# The local MPI cluster: N identical nodes on a private network.
+#
+#   docker compose up -d                    # the default, four nodes
+#   docker compose up -d --scale node=8     # or as many as you like
+#   ./scripts/start-cluster.sh 8            # same thing, and waits for healthy
+#
+# ---------------------------------------------------------------------------
+# One service, scaled -- not node1/node2/node3/node4
+# ---------------------------------------------------------------------------
+# Writing out four services would give prettier hostnames, but changing the
+# node count would then mean editing this file, and "change the number of
+# nodes" is a thing the environment is supposed to make trivial. One replicated
+# service means the count is a command-line argument.
+#
+# The cost is that each replica's hostname is its container id rather than
+# something readable. `./scripts/status.sh` prints the mapping from container
+# name to hostname to IP, which is what makes the output of examples/hello-mpi
+# interpretable.
+#
+# ---------------------------------------------------------------------------
+# Two mounts, doing two different jobs
+# ---------------------------------------------------------------------------
+#   .      -> /workspace   your working tree, live. Edit on the host in your
+#                          own editor; every node sees the change immediately.
+#   volume -> /build       build output, shared by all nodes. One node compiles
+#                          and every rank runs the same binary from the same
+#                          path, which is what mpirun requires.
+#
+# Build output goes in a Docker volume rather than under /workspace on purpose.
+# On Windows and macOS the bind mount crosses a filesystem boundary and object
+# files are slow to write there; a named volume lives in the VM and is not. It
+# also keeps a native host build in ./build from colliding with this one.
+
+name: mpi-lab
+
+services:
+  node:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: dev
+    image: mpi-lab:dev
+    deploy:
+      replicas: 4
+    networks:
+      - mpi-net
+    volumes:
+      - .:/workspace
+      - build:/build
+    working_dir: /workspace
+    # sshd forks a process per login and mpirun opens one per remote node, so
+    # something has to reap them. tini is that something.
+    init: true
+    # No `ports:` and no `expose:` to the host, deliberately. The nodes need to
+    # reach each other's port 22 and nothing else needs to reach it at all.
+    # Publishing it would put a container holding a well-known private key on a
+    # host-reachable port -- see the SSH section of the Dockerfile.
+    stop_grace_period: 5s
+
+networks:
+  mpi-net:
+    name: mpi-lab-net
+    driver: bridge
+
+volumes:
+  build:
+    name: mpi-lab-build
